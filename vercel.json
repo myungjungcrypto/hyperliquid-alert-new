@@ -1,0 +1,5 @@
+{
+  "crons": [
+    { "path": "/api/xpl-alert", "schedule": "* * * * *" }
+  ]
+}
