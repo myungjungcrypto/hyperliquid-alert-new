@@ -1,6 +1,7 @@
 const HL_INFO = "https://api.hyperliquid.xyz/info";
-const BX_PRICE = "https://open-api.bingx.com/openApi/spot/v1/ticker/price?symbol=XPLUSDT";
+const BX_PRICE = "https://open-api.bingx.com/openApi/spot/v1/ticker/price";
 const BX_24HR = "https://open-api.bingx.com/openApi/spot/v1/ticker/24hr";
+const BX_SYMBOLS = "https://open-api.bingx.com/openApi/spot/v1/common/symbols";
 
 const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -24,26 +25,58 @@ async function fetchHyperliquidMark() {
   return v;
 }
 
+async function discoverBingxSymbol() {
+  // 1) 우선 고정 후보들
+  const candidates = ["XPLUSDT", "XPLUSDT", "XPL_USDT", "XPL-USDT"];
+  // 2) 심볼 목록에서 자동 탐색 (있으면 정확한 표기 반환)
+  try {
+    const rs = await fetch(BX_SYMBOLS);
+    if (rs.ok) {
+      const js = await rs.json();
+      const arr = Array.isArray(js?.data) ? js.data : Array.isArray(js) ? js : [];
+      // data[i].symbol 또는 i.symbol 케이스 모두 대응
+      const list = arr.map(x => (x?.symbol || x?.baseAsset && x?.quoteAsset ? `${x.baseAsset}${x.quoteAsset}` : "")).filter(Boolean);
+      for (const want of candidates) {
+        const hit = list.find(s => s.toUpperCase() === want.toUpperCase());
+        if (hit) return hit;
+      }
+      // XPL/USDT 형태가 있으면 합쳐서 반환
+      const slash = arr.find(x => (x?.symbol || "").toUpperCase() === "XPL/USDT");
+      if (slash) return "XPLUSDT";
+    }
+  } catch (_) {}
+  // 못 찾으면 기본 후보 1순위
+  return candidates[0];
+}
+
 async function fetchBingxSpot() {
-  const r1 = await fetch(BX_PRICE);
-  if (r1.ok) {
-    const j1 = await r1.json();
-    const v1 = Number(j1?.data?.price ?? j1?.price);
-    if (Number.isFinite(v1)) return v1;
-  }
-  const r2 = await fetch(BX_24HR);
-  if (r2.ok) {
-    const j2 = await r2.json();
-    if (Array.isArray(j2)) {
-      const hit = j2.find(x => (x?.symbol || "").toUpperCase() === "XPLUSDT");
-      const v2 = Number(hit?.lastPrice ?? hit?.close ?? hit?.price);
-      if (Number.isFinite(v2)) return v2;
-    } else if (j2 && Array.isArray(j2?.data)) {
-      const hit = j2.data.find(x => (x?.symbol || "").toUpperCase() === "XPLUSDT");
+  const symbol = await discoverBingxSymbol();
+
+  // price 엔드포인트 (단건)
+  try {
+    const u = new URL(BX_PRICE);
+    u.searchParams.set("symbol", symbol);
+    const r = await fetch(u.toString());
+    if (r.ok) {
+      const j = await r.json();
+      // {data:{price}}, {price} 모두 대응
+      const v = Number(j?.data?.price ?? j?.price);
+      if (Number.isFinite(v)) return v;
+    }
+  } catch (_) {}
+
+  // 24hr 엔드포인트: 배열 또는 {data:[...]} 양쪽 대응
+  try {
+    const r2 = await fetch(BX_24HR);
+    if (r2.ok) {
+      const j2 = await r2.json();
+      const arr = Array.isArray(j2) ? j2 : Array.isArray(j2?.data) ? j2.data : [];
+      const hit = arr.find(x => (x?.symbol || "").toUpperCase() === symbol.toUpperCase());
       const v2 = Number(hit?.lastPrice ?? hit?.close ?? hit?.price);
       if (Number.isFinite(v2)) return v2;
     }
-  }
+  } catch (_) {}
+
   throw new Error("BingX price not found");
 }
 
