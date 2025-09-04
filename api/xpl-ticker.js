@@ -1,4 +1,5 @@
 const HL_INFO = "https://api.hyperliquid.xyz/info";
+
 const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const CRON_SECRET = process.env.CRON_SECRET;
@@ -21,12 +22,17 @@ async function fetchHL() {
 }
 
 async function sendTG(text) {
-  const r = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+  if (!TG_TOKEN) throw new Error("Missing env TELEGRAM_BOT_TOKEN");
+  if (!TG_CHAT_ID) throw new Error("Missing env TELEGRAM_CHAT_ID");
+
+  const url = `https://api.telegram.org/bot${TG_TOKEN}/sendMessage`;
+  const r = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ chat_id: TG_CHAT_ID, text, parse_mode: "HTML", disable_web_page_preview: true })
   });
-  if (!r.ok) throw new Error(`TG HTTP ${r.status}`);
+  const body = await r.text();
+  if (!r.ok) throw new Error(`TG HTTP ${r.status}: ${body}`);
 }
 
 module.exports = async (req, res) => {
@@ -46,7 +52,20 @@ module.exports = async (req, res) => {
       await sendTG(msg);
     }
 
-    res.status(200).json({ ok: true, debug: !!debug, mark, ...(debug ? { hlRaw: raw } : {}) });
+    res.status(200).json({
+      ok: true,
+      debug: !!debug,
+      mark,
+      ...(debug ? {
+        env: {
+          TELEGRAM_BOT_TOKEN_present: Boolean(TG_TOKEN),
+          TELEGRAM_BOT_TOKEN_len: TG_TOKEN ? TG_TOKEN.length : 0,
+          TELEGRAM_CHAT_ID_present: Boolean(TG_CHAT_ID),
+          CRON_SECRET_present: Boolean(CRON_SECRET)
+        },
+        hlRaw: raw
+      } : {})
+    });
   } catch (e) {
     res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
