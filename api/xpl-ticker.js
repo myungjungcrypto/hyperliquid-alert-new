@@ -4,6 +4,9 @@ const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const CRON_SECRET = process.env.CRON_SECRET;
 
+// 임계값(기본 1.0). 매분 크론이 호출될 때 mark >= 임계값이면 텔레그램 알림 보냄
+const XPL_THRESHOLD = Number(process.env.XPL_THRESHOLD || "1.0");
+
 async function fetchHL() {
   const r = await fetch(HL_INFO, {
     method: "POST",
@@ -24,7 +27,6 @@ async function fetchHL() {
 async function sendTG(text) {
   if (!TG_TOKEN) throw new Error("Missing env TELEGRAM_BOT_TOKEN");
   if (!TG_CHAT_ID) throw new Error("Missing env TELEGRAM_CHAT_ID");
-
   const url = `https://api.telegram.org/bot${TG_TOKEN}/sendMessage`;
   const r = await fetch(url, {
     method: "POST",
@@ -47,21 +49,33 @@ module.exports = async (req, res) => {
     const { mark, raw } = await fetchHL();
     const now = new Date().toISOString();
 
-    if (!debug) {
-      const msg = `<b>XPL 가격 알림</b>\nHL(mark): <b>${mark}</b>\n${now}`;
-      await sendTG(msg);
+    let sent = false;
+    let reason = "below-threshold";
+    if (mark >= XPL_THRESHOLD) {
+      reason = "over-threshold";
+      if (!debug) {
+        const msg = [
+          `<b>XPL 가격 알림</b>`,
+          `HL(mark): <b>${mark}</b>`,
+          `임계값: <b>${XPL_THRESHOLD}</b>`,
+          `${now}`
+        ].join("\n");
+        await sendTG(msg);
+      }
+      sent = true;
     }
 
     res.status(200).json({
       ok: true,
       debug: !!debug,
       mark,
+      threshold: XPL_THRESHOLD,
+      alert: { sent, reason },
       ...(debug ? {
         env: {
           TELEGRAM_BOT_TOKEN_present: Boolean(TG_TOKEN),
-          TELEGRAM_BOT_TOKEN_len: TG_TOKEN ? TG_TOKEN.length : 0,
           TELEGRAM_CHAT_ID_present: Boolean(TG_CHAT_ID),
-          CRON_SECRET_present: Boolean(CRON_SECRET)
+          CRON_SECRET_present: Boolean(CRON_SECRET),
         },
         hlRaw: raw
       } : {})
