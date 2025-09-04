@@ -1,8 +1,0 @@
-{
-  "crons": [
-    {
-      "path": "/api/xpl-ticker?token=${CRON_SECRET}",
-      "schedule": "* * * * *"
-    }
-  ]
-}
