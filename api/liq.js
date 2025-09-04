@@ -1,94 +1,93 @@
-const HL = "https://api.hyperliquid.xyz/info";
+// api/liq.js
+const HL_INFO = "https://api.hyperliquid.xyz/info";
 
-function normAddr(a) {
-  if (!a) return "";
-  return String(a).trim().toLowerCase();
+// 간단한 주소 검증
+function isHexAddress(s) {
+  return typeof s === "string" && /^0x[0-9a-fA-F]{40}$/.test(s);
 }
 
-async function hl(body) {
-  const r = await fetch(HL, {
+// HL에서 계좌 상태 가져오기 (clearinghouseState)
+async function fetchClearinghouseState(address) {
+  const query = { type: "clearinghouseState", user: address };
+  const r = await fetch(HL_INFO, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify(query)
   });
-  const txt = await r.text();
-  if (!r.ok) throw new Error(`HL ${body.type} ${r.status}: ${txt}`);
-  try { return JSON.parse(txt); } catch { return txt; }
+  const rawText = await r.text();
+  if (!r.ok) {
+    throw new Error(`HL HTTP ${r.status}: ${rawText}`);
+  }
+  let out;
+  try {
+    out = JSON.parse(rawText);
+  } catch (e) {
+    throw new Error(`HL JSON parse error: ${e?.message || e}`);
+  }
+  return { query, out, rawText };
 }
 
-function pickPositionsFromClearinghouseState(res) {
-  // 기대 형태: { assetPositions: [{ coin, szi, entryPx, ... }], crossMarginSummary: {...} }
-  const arr = res && res.assetPositions;
-  if (!Array.isArray(arr)) return [];
-  return arr.filter(p => Number(p?.szi) !== 0);
-}
-
-function pickPositionsFromTraderRisk(res) {
-  // 기대 형태: { positions: [{ coin, szi, entryPx, liqPx? }], ... }
-  const arr = res && res.positions;
-  if (!Array.isArray(arr)) return [];
-  return arr.filter(p => Number(p?.szi) !== 0);
-}
-
-function pickPositionsFromUserState(res) {
-  // 기대 형태: { userState: { assetPositions: [...] } } 또는 유사
-  const st = res && (res.userState || res.state || res.data);
-  const arr = st && (st.assetPositions || st.positions);
-  if (!Array.isArray(arr)) return [];
-  return arr.filter(p => Number(p?.szi) !== 0);
-}
-
+// 하이퍼리퀴드 포지션 맵핑
 function mapPos(p) {
-  const coin = p.coin || p.asset || p.name || p.sym || "?";
-  const size = Number(p.szi ?? p.sz ?? 0);
-  const entry = Number(p.entryPx ?? p.entry ?? p.netEntry ?? 0);
-  const liq   = p.liqPx !== undefined ? Number(p.liqPx) : null;
-  return { coin, size, entryPx: entry || null, liqPx: Number.isFinite(liq) ? liq : null, raw: p };
+  // 응답이 { type: "oneWay", position: {...} } 인 경우 언랩
+  const base = p && p.position ? p.position : p;
+
+  const coin = base?.coin || base?.asset || base?.name || base?.sym || "?";
+  const size = Number(base?.szi ?? base?.sz ?? 0);
+  const entry = Number(base?.entryPx ?? base?.entry ?? base?.netEntry ?? NaN);
+
+  // liquidationPx / liqPx 키 대응
+  let liq = null;
+  if (base && base.liquidationPx !== undefined) {
+    liq = Number(base.liquidationPx);
+  } else if (base && base.liqPx !== undefined) {
+    liq = Number(base.liqPx);
+  }
+
+  return {
+    coin,
+    size,                                   // 부호 포함 (롱/숏)
+    entryPx: Number.isFinite(entry) ? entry : null,
+    liqPx: Number.isFinite(liq) ? liq : null,
+    raw: p
+  };
 }
 
 module.exports = async (req, res) => {
   try {
-    const addr = normAddr(req.query.addr || req.query.address);
-    const sub  = req.query.sub ? Number(req.query.sub) : undefined; // 선택
-    const debug = req.query.debug === "1" || req.query.debug === "true";
+    const q = req.query || {};
+    const address = (q.addr || q.address || "").toString().trim();
+    const debug = q.debug === "1" || q.debug === "true";
 
-    if (!addr || !addr.startsWith("0x") || addr.length !== 42) {
-      return res.status(400).json({ ok: false, error: "addr query required (0x...)" });
+    if (!isHexAddress(address)) {
+      return res.status(400).json({ ok: false, error: "invalid address" });
     }
 
-    // 1) clearinghouseState
-    const tries = [];
-    tries.push({ type: "clearinghouseState", user: addr, ...(Number.isFinite(sub) ? { subAccount: sub } : {}) });
-    // 2) traderRisk
-    tries.push({ type: "traderRisk", user: addr, ...(Number.isFinite(sub) ? { subAccount: sub } : {}) });
-    // 3) userState (혹은 비슷한 래핑)
-    tries.push({ type: "userState", user: addr, ...(Number.isFinite(sub) ? { subAccount: sub } : {}) });
+    const rawTries = [];
+    const first = await fetchClearinghouseState(address);
+    rawTries.push(first);
 
-    let positions = [];
-    const raws = [];
+    const ch = first.out;
+    const positionsRaw = Array.isArray(ch?.assetPositions) ? ch.assetPositions : [];
+    const positions = positionsRaw.map(mapPos).filter(p => p && p.coin !== "?");
 
-    for (const q of tries) {
-      const out = await hl(q);
-      raws.push({ query: q, out });
-      let picked = [];
-      if (q.type === "clearinghouseState") picked = pickPositionsFromClearinghouseState(out);
-      else if (q.type === "traderRisk")   picked = pickPositionsFromTraderRisk(out);
-      else                                picked = pickPositionsFromUserState(out);
-
-      if (picked.length) {
-        positions = picked.map(mapPos);
-        break;
-      }
+    if (!positions.length) {
+      return res.status(200).json({
+        ok: true,
+        address,
+        subAccount: null,
+        positions: [],
+        note: "no open positions or unrecognized schema",
+        ...(debug ? { debug: { rawTries, lastTry: first } } : {})
+      });
     }
 
-    const ok = positions.length > 0;
-    return res.status(200).json({
+    res.status(200).json({
       ok: true,
-      address: addr,
-      subAccount: Number.isFinite(sub) ? sub : null,
+      address,
+      subAccount: null,
       positions,
-      note: ok ? undefined : "no positions found via 3 schema attempts",
-      ...(debug ? { debug: { rawTries: raws.slice(0, 2), lastTry: raws.at(-1) } } : {})
+      ...(debug ? { debug: { rawTries, lastTry: first } } : {})
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: e?.message || String(e) });
