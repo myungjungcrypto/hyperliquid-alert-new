@@ -10,7 +10,7 @@ const CRON_SECRET = process.env.CRON_SECRET;
 const UPPER_PCT = Number(process.env.SPREAD_UPPER_PCT ?? "40");
 const LOWER_PCT = Number(process.env.SPREAD_LOWER_PCT ?? "3");
 
-async function fetchHL(debug) {
+async function fetchHL() {
   const out = { ok: false, mark: null, status: null, raw: null, error: null };
   try {
     const r = await fetch(HL_INFO, {
@@ -35,85 +35,73 @@ async function fetchHL(debug) {
   return out;
 }
 
-async function discoverBingxSymbol(debug) {
-  const out = { symbol: "XPLUSDT", status: null, raw: null, tried: [] };
-  out.tried.push("XPLUSDT");
+async function discoverBingxSymbol() {
+  const candidates = ["XPL-USDT", "XPL_USDT", "XPLUSDT"];
   try {
     const rs = await fetch(BX_SYMBOLS);
-    out.status = rs.status;
-    out.raw = await rs.text();
-    if (rs.ok) {
-      const js = JSON.parse(out.raw);
-      const arr = Array.isArray(js?.data) ? js.data : Array.isArray(js) ? js : [];
-      const list = arr.map(x => x?.symbol || (x?.baseAsset && x?.quoteAsset ? `${x.baseAsset}${x.quoteAsset}` : "")).filter(Boolean);
-      const candidates = ["XPLUSDT", "XPLUSDT", "XPL_USDT", "XPL-USDT", "XPL/USDT"];
-      for (const want of candidates) {
-        const hit = list.find(s => (s || "").toUpperCase() === want.toUpperCase());
-        if (hit) {
-          out.symbol = (hit.includes("/") ? hit.replace("/", "") : hit.replace("-", "").replace("_",""));
-          out.tried = candidates;
-          return out;
-        }
+    const raw = await rs.text();
+    let js; try { js = JSON.parse(raw); } catch { js = null; }
+    const arr = Array.isArray(js?.data?.symbols) ? js.data.symbols : [];
+    if (arr.length) {
+      const all = arr.map(x => x?.symbol).filter(Boolean);
+      const xplLike = all.filter(s => typeof s === "string" && s.toUpperCase().includes("XPL"));
+      if (xplLike.length) {
+        const s = xplLike[0];
+        return { symbolApiForms: [s, s.replace("-", "_"), s.replace("-", "").replace("_","")], seenSymbols: all };
       }
+      return { symbolApiForms: candidates, seenSymbols: all };
     }
-  } catch (_) {}
-  return out;
+  } catch {}
+  return { symbolApiForms: candidates, seenSymbols: [] };
 }
 
-async function fetchBingxSpot(debug) {
+async function fetchBingxSpot() {
   const out = {
-    ok: false, price: null, symbol: null,
-    priceStatus: null, priceRaw: null,
-    hr24Status: null, hr24Raw: null,
-    symbolsStatus: null, symbolsRaw: null,
-    error: null
+    ok: false, price: null, symbolTried: [], priceStatus: null, priceRaw: null,
+    hr24Status: null, hr24Raw: null, symbolsSeen: [], error: null
   };
+  const { symbolApiForms, seenSymbols } = await discoverBingxSymbol();
+  out.symbolsSeen = seenSymbols;
 
-  const symInfo = await discoverBingxSymbol(debug);
-  out.symbol = symInfo.symbol;
-  out.symbolsStatus = symInfo.status;
-  out.symbolsRaw = symInfo.raw;
-
-  // 1) ticker/price (단건)
-  try {
-    const u = new URL(BX_PRICE);
-    u.searchParams.set("symbol", out.symbol);
-    const r1 = await fetch(u.toString());
-    out.priceStatus = r1.status;
-    out.priceRaw = await r1.text();
-    if (r1.ok) {
-      const j1 = JSON.parse(out.priceRaw);
-      const v1 = Number(j1?.data?.price ?? j1?.price);
-      if (Number.isFinite(v1)) {
-        out.ok = true;
-        out.price = v1;
-        return out;
+  for (const form of symbolApiForms) {
+    try {
+      const u = new URL(BX_PRICE);
+      u.searchParams.set("symbol", form);
+      u.searchParams.set("timestamp", String(Date.now()));
+      const r = await fetch(u.toString());
+      out.priceStatus = r.status;
+      out.priceRaw = await r.text();
+      out.symbolTried.push(form);
+      if (r.ok) {
+        let j; try { j = JSON.parse(out.priceRaw); } catch {}
+        const v = Number(j?.data?.price ?? j?.price);
+        if (Number.isFinite(v)) { out.ok = true; out.price = v; return out; }
       }
+    } catch (e) {
+      out.error = `price err(${form}): ${String(e.message || e)}`;
     }
-  } catch (e) {
-    out.error = `price endpoint err: ${String(e.message || e)}`;
   }
 
-  // 2) 24hr (배열 또는 data 배열)
   try {
-    const r2 = await fetch(BX_24HR);
+    const u2 = new URL(BX_24HR);
+    u2.searchParams.set("timestamp", String(Date.now()));
+    const r2 = await fetch(u2.toString());
     out.hr24Status = r2.status;
     out.hr24Raw = await r2.text();
     if (r2.ok) {
-      const j2 = JSON.parse(out.hr24Raw);
-      const arr = Array.isArray(j2) ? j2 : Array.isArray(j2?.data) ? j2.data : [];
-      const hit = arr.find(x => (x?.symbol || "").toUpperCase() === (out.symbol || "").toUpperCase());
-      if (hit) {
-        const v2 = Number(hit?.lastPrice ?? hit?.close ?? hit?.price);
-        if (Number.isFinite(v2)) {
-          out.ok = true;
-          out.price = v2;
-          return out;
+      let j2; try { j2 = JSON.parse(out.hr24Raw); } catch {}
+      const arr = Array.isArray(j2) ? j2 : (Array.isArray(j2?.data) ? j2.data : []);
+      for (const form of symbolApiForms) {
+        const norm = form.replace("_","-").toUpperCase();
+        const hit = arr.find(x => (x?.symbol || "").toUpperCase() === norm);
+        if (hit) {
+          const v2 = Number(hit?.lastPrice ?? hit?.close ?? hit?.price);
+          if (Number.isFinite(v2)) { out.ok = true; out.price = v2; return out; }
         }
       }
     }
   } catch (e) {
-    out.error = `${out.error ? out.error + " | " : ""}24hr endpoint err: ${String(e.message || e)}`;
+    out.error = `${out.error ? out.error + " | " : ""}24hr err: ${String(e.message || e)}`;
   }
 
   if (!out.ok && !out.error) out.error = "not found";
@@ -139,7 +127,7 @@ module.exports = async (req, res) => {
       return res.status(401).json({ ok: false, error: "unauthorized" });
     }
 
-    const [hl, bx] = await Promise.all([fetchHL(debug), fetchBingxSpot(debug)]);
+    const [hl, bx] = await Promise.all([fetchHL(), fetchBingxSpot()]);
     if (!hl.ok) return res.status(500).json({ ok: false, source: "hyperliquid", ...hl });
     if (!bx.ok)   return res.status(500).json({ ok: false, source: "bingx", ...bx });
 
@@ -168,7 +156,8 @@ module.exports = async (req, res) => {
       debug: !!debug,
       hl: { mark: hl.mark, status: hl.status },
       bingx: {
-        symbol: bx.symbol,
+        tried: bx.symbolTried,
+        seen: bx.symbolsSeen,
         price: bx.price,
         priceStatus: bx.priceStatus,
         hr24Status: bx.hr24Status
@@ -180,8 +169,7 @@ module.exports = async (req, res) => {
       ...(debug ? {
         hlRaw: hl.raw,
         bxPriceRaw: bx.priceRaw,
-        bx24hrRaw: bx.hr24Raw,
-        bxSymbolsRaw: bx.symbolsRaw
+        bx24hrRaw: bx.hr24Raw
       } : {})
     });
   } catch (e) {
